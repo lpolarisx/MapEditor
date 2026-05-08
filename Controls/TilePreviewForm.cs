@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -16,6 +17,8 @@ namespace MapEditor.Controls
         private readonly Image  _image;
         private readonly MapTile _tile;
         private readonly string  _terrainName;
+        private readonly int[,] _draftTerrainIds;
+        private readonly HashSet<Point> _modifiedCells = new HashSet<Point>();
 
         // 变换状态
         private float _zoom = 1f;
@@ -42,6 +45,11 @@ namespace MapEditor.Controls
         private Label   _lblRoutewayActive;
         private Label   _lblRoutewayConsume;
         private PictureBox _terrainColorBox;
+        private ComboBox _terrainSelector;
+        private Button _btnApplyCell;
+        private Button _btnRevertCell;
+        private Button _btnSubmit;
+        private Label _lblEditState;
 
         private const int TerrainCellsPerTile = 10;
         private int _selectedTerrainX = -1;
@@ -52,6 +60,7 @@ namespace MapEditor.Controls
             _image       = image;
             _tile        = tile;
             _terrainName = terrainName;
+            _draftTerrainIds = CloneTerrainIds(tile.TerrainIds);
 
             BuildUI();
             FitToWindow();   // 初始适应窗口
@@ -67,7 +76,7 @@ namespace MapEditor.Controls
             Font            = new Font("微软雅黑", 9f);
             StartPosition   = FormStartPosition.CenterParent;
             KeyPreview      = true;
-            KeyDown        += (s, e) => { if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Return) Close(); };
+            KeyDown        += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
 
             // ── 底部信息栏 ────────────────────────────────────
             var bottomBar = new Panel
@@ -222,11 +231,36 @@ namespace MapEditor.Controls
             _lblRoutewayBuild = MakeInfoLabel("粮道开通（资金/工量）：—", isDesc: true);
             _lblRoutewayActive = MakeInfoLabel("粮道维持资金：—");
             _lblRoutewayConsume = MakeInfoLabel("粮草消耗率：—");
+            _lblEditState = MakeInfoLabel("待提交修改：0");
+
+            _terrainSelector = new ComboBox
+            {
+                Width = 176,
+                Height = 26,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                BackColor = Color.FromArgb(36, 36, 50),
+                ForeColor = Color.FromArgb(220, 225, 235),
+                FlatStyle = FlatStyle.Flat,
+                Margin = new Padding(0, 4, 0, 6)
+            };
+            foreach (var terrain in TerrainRepository.All)
+                _terrainSelector.Items.Add(terrain);
+
+            _btnApplyCell = MakeActionButton("修改单元", ApplySelectedTerrainToCell);
+            _btnRevertCell = MakeActionButton("撤销单元", RevertSelectedCell);
+            _btnSubmit = MakeActionButton("提交修改", SubmitChanges);
+            _btnSubmit.BackColor = Color.FromArgb(56, 92, 68);
+            _btnSubmit.Enabled = false;
 
             flow.Controls.Add(_lblTerrainCell);
             flow.Controls.Add(MakeSeparator());
             flow.Controls.Add(_terrainColorBox);
             flow.Controls.Add(_lblTerrainName);
+            flow.Controls.Add(_terrainSelector);
+            flow.Controls.Add(_btnApplyCell);
+            flow.Controls.Add(_btnRevertCell);
+            flow.Controls.Add(_btnSubmit);
+            flow.Controls.Add(_lblEditState);
             flow.Controls.Add(MakeSeparator());
             flow.Controls.Add(_lblCanExtend);
             flow.Controls.Add(_lblViewThrough);
@@ -315,6 +349,7 @@ namespace MapEditor.Controls
                 _image.Height * _zoom);
 
             g.DrawImage(_image, destRect);
+            DrawTerrainOverlay(g, destRect);
             DrawTerrainGrid(g, destRect);
 
             // 图片边框
@@ -440,9 +475,36 @@ namespace MapEditor.Controls
             g.DrawRectangle(pen, rect.X, rect.Y, rect.Width, rect.Height);
         }
 
+        private void DrawTerrainOverlay(Graphics g, RectangleF imageRect)
+        {
+            for (int localY = 0; localY < TerrainCellsPerTile; localY++)
+            {
+                float y1 = imageRect.Top + imageRect.Height * localY / TerrainCellsPerTile;
+                float y2 = imageRect.Top + imageRect.Height * (localY + 1) / TerrainCellsPerTile;
+
+                for (int localX = 0; localX < TerrainCellsPerTile; localX++)
+                {
+                    var terrain = TerrainRepository.GetById(_draftTerrainIds[localX, localY]);
+                    if (terrain == null) continue;
+
+                    float x1 = imageRect.Left + imageRect.Width * localX / TerrainCellsPerTile;
+                    float x2 = imageRect.Left + imageRect.Width * (localX + 1) / TerrainCellsPerTile;
+                    using var brush = new SolidBrush(Color.FromArgb(terrain.MapColor.A,
+                        terrain.MapColor.R, terrain.MapColor.G, terrain.MapColor.B));
+                    g.FillRectangle(brush, x1, y1, Math.Max(1f, x2 - x1), Math.Max(1f, y2 - y1));
+
+                    if (_modifiedCells.Contains(new Point(localX, localY)))
+                    {
+                        using var pen = new Pen(Color.FromArgb(230, 255, 245, 120), 2f);
+                        g.DrawRectangle(pen, x1 + 1, y1 + 1, Math.Max(1f, x2 - x1 - 2), Math.Max(1f, y2 - y1 - 2));
+                    }
+                }
+            }
+        }
+
         private void UpdateTerrainInfo(int cellX, int cellY)
         {
-            if (_tile.TerrainIds == null || cellX < 0 || cellY < 0)
+            if (cellX < 0 || cellY < 0)
             {
                 _lblTerrainCell.Text = "单元：—";
                 _terrainColorBox.BackColor = Color.FromArgb(50, 50, 65);
@@ -457,18 +519,25 @@ namespace MapEditor.Controls
                 _lblRoutewayBuild.Text = "粮道开通（资金/工量）：—";
                 _lblRoutewayActive.Text = "粮道维持资金：—";
                 _lblRoutewayConsume.Text = "粮草消耗率：—";
+                _terrainSelector.SelectedIndex = -1;
+                _btnApplyCell.Enabled = false;
+                _btnRevertCell.Enabled = false;
                 return;
             }
 
-            int terrainId = _tile.TerrainIds[cellX, cellY];
+            int terrainId = _draftTerrainIds[cellX, cellY];
             var terrain = TerrainRepository.GetById(terrainId);
-            _lblTerrainCell.Text = $"单元：({cellX}, {cellY})";
+            bool modified = _modifiedCells.Contains(new Point(cellX, cellY));
+            _lblTerrainCell.Text = $"单元：({cellX}, {cellY}){(modified ? "  *已修改" : "")}";
             if (terrain == null)
             {
                 _lblTerrainName.Text = $"未知地形 (ID {terrainId})";
                 return;
             }
 
+            SelectTerrainInCombo(terrainId);
+            _btnApplyCell.Enabled = true;
+            _btnRevertCell.Enabled = modified;
             _terrainColorBox.BackColor = Color.FromArgb(255,
                 terrain.MapColor.R, terrain.MapColor.G, terrain.MapColor.B);
             _lblTerrainName.Text = $"{terrain.Name}  (ID {terrain.ID})";
@@ -482,6 +551,101 @@ namespace MapEditor.Controls
             _lblRoutewayBuild.Text = $"粮道开通（资金/工量）：\n{terrain.RoutewayBuildFundCost} / {terrain.RoutewayBuildWorkCost}";
             _lblRoutewayActive.Text = $"粮道维持资金：{terrain.RoutewayActiveFundCost}";
             _lblRoutewayConsume.Text = $"粮草消耗率：{terrain.RoutewayConsumptionRate:F3}";
+        }
+
+        public bool HasChanges => _modifiedCells.Count > 0;
+
+        public int[,] EditedTerrainIds => CloneTerrainIds(_draftTerrainIds);
+
+        private void ApplySelectedTerrainToCell()
+        {
+            if (_selectedTerrainX < 0 || _selectedTerrainY < 0) return;
+            if (!(_terrainSelector.SelectedItem is TerrainData terrain)) return;
+
+            _draftTerrainIds[_selectedTerrainX, _selectedTerrainY] = terrain.ID;
+            var point = new Point(_selectedTerrainX, _selectedTerrainY);
+            if (_tile.TerrainIds != null && _tile.TerrainIds[_selectedTerrainX, _selectedTerrainY] == terrain.ID)
+                _modifiedCells.Remove(point);
+            else
+                _modifiedCells.Add(point);
+
+            UpdateEditState();
+            UpdateTerrainInfo(_selectedTerrainX, _selectedTerrainY);
+            _canvas.Invalidate();
+        }
+
+        private void RevertSelectedCell()
+        {
+            if (_selectedTerrainX < 0 || _selectedTerrainY < 0 || _tile.TerrainIds == null) return;
+
+            _draftTerrainIds[_selectedTerrainX, _selectedTerrainY] = _tile.TerrainIds[_selectedTerrainX, _selectedTerrainY];
+            _modifiedCells.Remove(new Point(_selectedTerrainX, _selectedTerrainY));
+            UpdateEditState();
+            UpdateTerrainInfo(_selectedTerrainX, _selectedTerrainY);
+            _canvas.Invalidate();
+        }
+
+        private void SubmitChanges()
+        {
+            if (!HasChanges)
+            {
+                DialogResult = DialogResult.Cancel;
+                Close();
+                return;
+            }
+
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        private void UpdateEditState()
+        {
+            _lblEditState.Text = $"待提交修改：{_modifiedCells.Count}";
+            _btnSubmit.Enabled = HasChanges;
+        }
+
+        private void SelectTerrainInCombo(int terrainId)
+        {
+            for (int i = 0; i < _terrainSelector.Items.Count; i++)
+            {
+                if (((TerrainData)_terrainSelector.Items[i]).ID == terrainId)
+                {
+                    _terrainSelector.SelectedIndex = i;
+                    return;
+                }
+            }
+
+            _terrainSelector.SelectedIndex = -1;
+        }
+
+        private static int[,] CloneTerrainIds(int[,] terrainIds)
+        {
+            var clone = new int[TerrainCellsPerTile, TerrainCellsPerTile];
+            if (terrainIds == null) return clone;
+
+            for (int y = 0; y < TerrainCellsPerTile; y++)
+                for (int x = 0; x < TerrainCellsPerTile; x++)
+                    clone[x, y] = terrainIds[x, y];
+
+            return clone;
+        }
+
+        private static Button MakeActionButton(string text, Action onClick)
+        {
+            var button = new Button
+            {
+                Text = text,
+                Width = 176,
+                Height = 26,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(45, 45, 62),
+                ForeColor = Color.FromArgb(220, 225, 235),
+                Font = new Font("微软雅黑", 8.5f),
+                Margin = new Padding(0, 0, 0, 4)
+            };
+            button.FlatAppearance.BorderColor = Color.FromArgb(65, 65, 85);
+            button.Click += (s, e) => onClick();
+            return button;
         }
 
         private static Label MakeInfoLabel(string text, bool bold = false, float fontSize = 9f, bool isDesc = false)

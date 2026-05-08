@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -271,7 +272,24 @@ namespace MapEditor
             string terrainName = terrain?.Name ?? "未知";
 
             using var preview = new Controls.TilePreviewForm(img, tile, terrainName);
-            preview.ShowDialog(this);
+            if (preview.ShowDialog(this) != DialogResult.OK || !preview.HasChanges)
+                return;
+
+            try
+            {
+                _mapPanel.UpdateTileTerrainIds(tile, preview.EditedTerrainIds);
+                _mapPanel.SaveMapData();
+
+                var updatedTerrain = TerrainRepository.GetById(tile.TerrainId);
+                if (updatedTerrain != null)
+                    OnTileClicked(tile);
+                _statusLabel.Text = $"已更新 ({tile.Col},{tile.Row}) 的地形数据并保存到 {Path.GetFileName(MapPanel.GetMapDataPath())}";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"保存 MapData.txt 失败：{ex.Message}", "保存失败",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         // ─────────────────────────────────────────────────────

@@ -117,31 +117,27 @@ namespace MapEditor.Controls
 
         private List<int> GetTerrains()
         {
-            string directoryPath = AppContext.BaseDirectory;
-
             List<int> numbers = new List<int>();
+            string filePath = GetMapDataPath();
 
-            // 获取目录下所有 txt 文件
-            string[] files = Directory.GetFiles(directoryPath, "MapData.txt");
+            if (!File.Exists(filePath))
+                return numbers;
 
-            foreach (string file in files)
+            // 读取整个文件内容
+            string content = File.ReadAllText(filePath);
+
+            // 按空白字符拆分，兼容空格和换行
+            string[] parts = content.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (string part in parts)
             {
-                // 读取整个文件内容
-                string content = File.ReadAllText(file);
-
-                // 按空格拆分
-                string[] parts = content.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-                foreach (string part in parts)
+                if (int.TryParse(part, out int n))
                 {
-                    if (int.TryParse(part, out int n))
-                    {
-                        numbers.Add(n);
-                    }
-                    else
-                    {
-                        Console.WriteLine($"无法解析为整数: {part}");
-                    }
+                    numbers.Add(n);
+                }
+                else
+                {
+                    Console.WriteLine($"无法解析为整数: {part}");
                 }
             }
 
@@ -215,6 +211,64 @@ namespace MapEditor.Controls
             }
 
             Invalidate(TileScreenRect(col, row));
+        }
+
+        public void UpdateTileTerrainIds(MapTile tile, int[,] terrainIds)
+        {
+            if (tile == null || terrainIds == null) return;
+            if (_map == null || tile.Col < 0 || tile.Col >= _cols || tile.Row < 0 || tile.Row >= _rows) return;
+
+            var target = _map[tile.Col, tile.Row];
+            if (target.TerrainIds == null)
+                target.TerrainIds = new int[TerrainCellsPerTile, TerrainCellsPerTile];
+
+            for (int y = 0; y < TerrainCellsPerTile; y++)
+            {
+                for (int x = 0; x < TerrainCellsPerTile; x++)
+                {
+                    target.TerrainIds[x, y] = terrainIds[x, y];
+                }
+            }
+
+            target.TerrainId = GetRepresentativeTerrain(target.TerrainIds);
+            Invalidate(TileScreenRect(target.Col, target.Row));
+        }
+
+        public void SaveMapData()
+        {
+            if (_map == null) return;
+
+            string filePath = GetMapDataPath();
+            using var writer = new StreamWriter(filePath, false);
+            int terrainCols = _cols * TerrainCellsPerTile;
+            int terrainRows = _rows * TerrainCellsPerTile;
+
+            for (int globalY = 0; globalY < terrainRows; globalY++)
+            {
+                int tileRow = globalY / TerrainCellsPerTile;
+                int localY = globalY % TerrainCellsPerTile;
+
+                for (int globalX = 0; globalX < terrainCols; globalX++)
+                {
+                    int tileCol = globalX / TerrainCellsPerTile;
+                    int localX = globalX % TerrainCellsPerTile;
+                    var terrainIds = _map[tileCol, tileRow].TerrainIds;
+                    int terrainId = terrainIds == null
+                        ? _map[tileCol, tileRow].TerrainId
+                        : terrainIds[localX, localY];
+
+                    if (globalX > 0)
+                        writer.Write(' ');
+                    writer.Write(terrainId);
+                }
+
+                writer.WriteLine();
+            }
+        }
+
+        public static string GetMapDataPath()
+        {
+            return Path.Combine(AppContext.BaseDirectory, "MapData.txt");
         }
 
         // ── 鼠标滚轮缩放 ──────────────────────────────────────
