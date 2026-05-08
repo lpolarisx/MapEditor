@@ -1,0 +1,29 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userprefs
+
+# Build results
+bin/
+obj/
+out/
+
+# Visual Studio Code
+.vscode/
+
+# ReSharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+
+# NuGet
+*.nupkg
+packages/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Backup files
+*.bak
+*~
