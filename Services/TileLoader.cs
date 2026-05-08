@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace MapEditor.Services
@@ -12,11 +14,29 @@ namespace MapEditor.Services
     /// </summary>
     public class TileLoader : IDisposable
     {
-        private readonly List<Image> _tiles = new List<Image>();
+        private const int MapTileCacheSize = 256;
+        private readonly List<string> _tileFiles = new List<string>();
+        private readonly Dictionary<int, Image> _mapTileCache = new Dictionary<int, Image>();
+        private readonly Dictionary<int, Image> _previewCache = new Dictionary<int, Image>();
+        private readonly object _syncRoot = new object();
         private bool _disposed;
 
-        public IReadOnlyList<Image> Tiles => _tiles.AsReadOnly();
-        public int Count => _tiles.Count;
+        public IReadOnlyList<Image> Tiles
+        {
+            get
+            {
+                lock (_syncRoot)
+                    return new List<Image>(_mapTileCache.Values).AsReadOnly();
+            }
+        }
+        public int Count
+        {
+            get
+            {
+                lock (_syncRoot)
+                    return _tileFiles.Count;
+            }
+        }
         public int TileWidth { get; private set; } = 32;
         public int TileHeight { get; private set; } = 32;
 
@@ -46,26 +66,25 @@ namespace MapEditor.Services
                 return na.CompareTo(nb);
             });
 
-            // 释放旧数据
-            foreach (var img in _tiles) img.Dispose();
-            _tiles.Clear();
-
             int loaded = 0;
             var errors = new List<string>();
+            var loadedFiles = new List<string>();
+            int tileWidth = TileWidth;
+            int tileHeight = TileHeight;
 
             foreach (var file in files)
             {
                 try
                 {
-                    var bmp = new Bitmap(file);
-                    _tiles.Add(bmp);
-
                     // 用第一张图确定tile尺寸
                     if (loaded == 0)
                     {
-                        TileWidth = bmp.Width;
-                        TileHeight = bmp.Height;
+                        using var original = new Bitmap(file);
+                        tileWidth = original.Width;
+                        tileHeight = original.Height;
                     }
+
+                    loadedFiles.Add(file);
                     loaded++;
                 }
                 catch (Exception ex)
@@ -78,13 +97,122 @@ namespace MapEditor.Services
             if (errors.Count > 0)
                 msg += $"\n失败 {errors.Count} 张";
 
+            if (loaded > 0)
+            {
+                lock (_syncRoot)
+                {
+                    ClearImages();
+                    _tileFiles.AddRange(loadedFiles);
+                    TileWidth = tileWidth;
+                    TileHeight = tileHeight;
+                }
+            }
+
             return new LoadResult(loaded > 0, msg, loaded);
         }
 
         public Image GetTile(int index)
         {
-            if (index < 0 || index >= _tiles.Count) return null;
-            return _tiles[index];
+            string file;
+            lock (_syncRoot)
+            {
+                if (index < 0 || index >= _tileFiles.Count) return null;
+                if (_previewCache.TryGetValue(index, out var cached)) return cached;
+                file = _tileFiles[index];
+            }
+
+            try
+            {
+                var image = new Bitmap(file);
+                lock (_syncRoot)
+                {
+                    if (_previewCache.TryGetValue(index, out var cached))
+                    {
+                        image.Dispose();
+                        return cached;
+                    }
+
+                    _previewCache[index] = image;
+                }
+                return image;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public Image GetMapTile(int index)
+        {
+            string file;
+            lock (_syncRoot)
+            {
+                if (index < 0 || index >= _tileFiles.Count) return null;
+                if (_mapTileCache.TryGetValue(index, out var cached)) return cached;
+                file = _tileFiles[index];
+            }
+
+            try
+            {
+                using var original = new Bitmap(file);
+                var image = CreateMapTile(original);
+                lock (_syncRoot)
+                {
+                    if (_mapTileCache.TryGetValue(index, out var cached))
+                    {
+                        image.Dispose();
+                        return cached;
+                    }
+
+                    _mapTileCache[index] = image;
+                }
+                return image;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public Task PreloadMapTilesAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.Run(() =>
+            {
+                int count = Count;
+                for (int i = 0; i < count; i++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    GetMapTile(i);
+                }
+            }, cancellationToken);
+        }
+
+        private static Image CreateMapTile(Image original)
+        {
+            int maxSide = Math.Max(original.Width, original.Height);
+            if (maxSide <= MapTileCacheSize)
+                return new Bitmap(original);
+
+            float scale = MapTileCacheSize / (float)maxSide;
+            int width = Math.Max(1, (int)Math.Round(original.Width * scale));
+            int height = Math.Max(1, (int)Math.Round(original.Height * scale));
+
+            var bitmap = new Bitmap(width, height);
+            using var g = Graphics.FromImage(bitmap);
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+            g.DrawImage(original, new Rectangle(0, 0, width, height));
+            return bitmap;
+        }
+
+        private void ClearImages()
+        {
+            foreach (var img in _mapTileCache.Values) img.Dispose();
+            foreach (var img in _previewCache.Values) img.Dispose();
+
+            _tileFiles.Clear();
+            _mapTileCache.Clear();
+            _previewCache.Clear();
         }
 
         private static int ExtractNumber(string name)
@@ -100,8 +228,8 @@ namespace MapEditor.Services
         {
             if (!_disposed)
             {
-                foreach (var img in _tiles) img?.Dispose();
-                _tiles.Clear();
+                lock (_syncRoot)
+                    ClearImages();
                 _disposed = true;
             }
         }

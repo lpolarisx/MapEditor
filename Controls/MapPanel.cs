@@ -19,6 +19,8 @@ namespace MapEditor.Controls
         private TileLoader _tileLoader;
         private int _cols = 30;
         private int _rows = 30;
+        private const int TerrainCellsPerTile = 10;
+        private static readonly Dictionary<int, Color> TerrainColorCache = BuildTerrainColorCache();
 
         // 原始tile尺寸（图片实际px，1000×1000）
         private int _srcTileW = 64;
@@ -95,12 +97,14 @@ namespace MapEditor.Controls
             {
                 for (int c = 0; c < cols; c++)
                 {
+                    var tileTerrains = BuildTileTerrains(terrains, cols, c, r);
                     _map[c, r] = new MapTile
                     {
                         Col = c,
                         Row = r,
                         TileImageIndex = (loader != null && loader.Count > 0) ? tileIndex % loader.Count : 0,
-                        TerrainId = terrains[tileIndex]
+                        TerrainId = GetRepresentativeTerrain(tileTerrains),
+                        TerrainIds = tileTerrains
                     };
                     tileIndex++;
                 }
@@ -144,6 +148,38 @@ namespace MapEditor.Controls
             return numbers;
         }
 
+        private static int[,] BuildTileTerrains(IReadOnlyList<int> terrains, int tileCols, int tileCol, int tileRow)
+        {
+            var tileTerrains = new int[TerrainCellsPerTile, TerrainCellsPerTile];
+            int terrainCols = tileCols * TerrainCellsPerTile;
+
+            for (int localY = 0; localY < TerrainCellsPerTile; localY++)
+            {
+                int globalY = tileRow * TerrainCellsPerTile + localY;
+                for (int localX = 0; localX < TerrainCellsPerTile; localX++)
+                {
+                    int globalX = tileCol * TerrainCellsPerTile + localX;
+                    int terrainIndex = globalY * terrainCols + globalX;
+                    tileTerrains[localX, localY] = GetTerrainOrDefault(terrains, terrainIndex);
+                }
+            }
+
+            return tileTerrains;
+        }
+
+        private static int GetTerrainOrDefault(IReadOnlyList<int> terrains, int index)
+        {
+            if (terrains == null || terrains.Count == 0) return 0;
+            if (index < 0) return 0;
+            if (index >= terrains.Count) return terrains[terrains.Count - 1];
+            return terrains[index];
+        }
+
+        private static int GetRepresentativeTerrain(int[,] terrainIds)
+        {
+            return terrainIds[TerrainCellsPerTile / 2, TerrainCellsPerTile / 2];
+        }
+
         // ── 缩放（外部调用，如工具栏按钮） ───────────────────
         public void ZoomIn()  => ApplyZoom(_zoom * ZoomStep);
         public void ZoomOut() => ApplyZoom(_zoom / ZoomStep);
@@ -167,6 +203,17 @@ namespace MapEditor.Controls
         {
             if (_map == null || col < 0 || col >= _cols || row < 0 || row >= _rows) return;
             _map[col, row].TerrainId = terrainId;
+            if (_map[col, row].TerrainIds == null)
+                _map[col, row].TerrainIds = new int[TerrainCellsPerTile, TerrainCellsPerTile];
+
+            for (int y = 0; y < TerrainCellsPerTile; y++)
+            {
+                for (int x = 0; x < TerrainCellsPerTile; x++)
+                {
+                    _map[col, row].TerrainIds[x, y] = terrainId;
+                }
+            }
+
             Invalidate(TileScreenRect(col, row));
         }
 
@@ -275,7 +322,7 @@ namespace MapEditor.Controls
                     var rect = new Rectangle(x, y, tw, th);
 
                     // 1. tile 图片
-                    var img = _tileLoader?.GetTile(tile.TileImageIndex);
+                    var img = _tileLoader?.GetMapTile(tile.TileImageIndex);
                     if (img != null)
                         g.DrawImage(img, rect);
                     else
@@ -284,15 +331,10 @@ namespace MapEditor.Controls
                     // 2. 地形叠加色
                     if (ShowTerrainOverlay)
                     {
-                        var terrain = MapEditor.Data.TerrainRepository.GetById(tile.TerrainId);
-                        if (terrain != null)
-                        {
-                            TerrainBrush.Color = terrain.MapColor;
-                            g.FillRectangle(TerrainBrush, rect);
-                        }
+                        DrawTerrainOverlay(g, tile, rect);
                     }
 
-                    // 3. 网格线
+                    // 3. 图片网格线
                     if (ShowGrid)
                         g.DrawRectangle(GridPen, rect);
 
@@ -333,6 +375,43 @@ namespace MapEditor.Controls
             var msg = "请先加载 Tile 图片文件夹";
             var sz = g.MeasureString(msg, f);
             g.DrawString(msg, f, b, (Width - sz.Width) / 2, (Height - sz.Height) / 2);
+        }
+
+        private static void DrawTerrainOverlay(Graphics g, MapTile tile, Rectangle rect)
+        {
+            if (tile.TerrainIds == null)
+            {
+                if (!TerrainColorCache.TryGetValue(tile.TerrainId, out var color)) return;
+
+                TerrainBrush.Color = color;
+                g.FillRectangle(TerrainBrush, rect);
+                return;
+            }
+
+            for (int localY = 0; localY < TerrainCellsPerTile; localY++)
+            {
+                int y1 = rect.Top + rect.Height * localY / TerrainCellsPerTile;
+                int y2 = rect.Top + rect.Height * (localY + 1) / TerrainCellsPerTile;
+
+                for (int localX = 0; localX < TerrainCellsPerTile; localX++)
+                {
+                    if (!TerrainColorCache.TryGetValue(tile.TerrainIds[localX, localY], out var color)) continue;
+
+                    int x1 = rect.Left + rect.Width * localX / TerrainCellsPerTile;
+                    int x2 = rect.Left + rect.Width * (localX + 1) / TerrainCellsPerTile;
+
+                    TerrainBrush.Color = color;
+                    g.FillRectangle(TerrainBrush, x1, y1, Math.Max(1, x2 - x1), Math.Max(1, y2 - y1));
+                }
+            }
+        }
+
+        private static Dictionary<int, Color> BuildTerrainColorCache()
+        {
+            var colors = new Dictionary<int, Color>();
+            foreach (var terrain in MapEditor.Data.TerrainRepository.All)
+                colors[terrain.ID] = terrain.MapColor;
+            return colors;
         }
 
         private Rectangle TileScreenRect(int col, int row)
